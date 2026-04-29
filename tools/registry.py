@@ -82,30 +82,43 @@ class ToolRegistry:
         func_info = self._functions.get(name)
         return func_info["func"] if func_info else None
 
-    def execute_tool(self, name:str, parameters:Dict[str, Any]) -> str:
+    def execute_tool(self, name: str, parameters: Dict[str, Any]) -> str:
         """
         执行工具
 
         Args:
             name: 工具名称
-            input_text: 输入参数
+            parameters: 工具参数字典（兼容 Anthropic SDK block.input 对象）
 
         Returns:
-            工具执行结果
+            工具执行结果字符串
         """
-        # 优先查找Tool对象
+        # 确保 parameters 是普通 dict（兼容 Anthropic SDK 返回的类 dict 对象）
+        if not isinstance(parameters, dict):
+            parameters = dict(parameters)
+
+        # 优先查找 Tool 对象
         if name in self._tools:
             tool = self._tools[name]
+            # 校验必需参数
+            missing = [
+                p.name for p in tool.get_parameters()
+                if p.required and p.name not in parameters
+            ]
+            if missing:
+                return f"错误：工具 '{name}' 缺少必需参数: {', '.join(missing)}"
             try:
-                # 简化参数传递，直接传入字符串
-                return tool.run(parameters)
+                result = tool.run(parameters)
+                return result if isinstance(result, str) else str(result)
             except Exception as e:
                 return f"错误：执行工具 '{name}' 时发生异常: {str(e)}"
+
         # 查找函数工具
         elif name in self._functions:
             func = self._functions[name]["func"]
             try:
-                return func(parameters)
+                result = func(parameters)
+                return result if isinstance(result, str) else str(result)
             except Exception as e:
                 return f"错误：执行工具 '{name}' 时发生异常: {str(e)}"
 
