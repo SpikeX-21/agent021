@@ -1,7 +1,8 @@
 """bash工具"""
 
 from typing import Dict, Any
-
+import subprocess
+import os
 from ..base import Tool
 
 class BashTool(Tool):
@@ -25,7 +26,7 @@ class BashTool(Tool):
             命令执行结果
         """
         # 支持两种参数格式：command 和 expression
-        command = parameters.get("command", "") or parameters.get("expression", "")
+        command = parameters.get("command", "")
         if not command:
             return "错误：命令不能为空"
 
@@ -53,12 +54,12 @@ class BashTool(Tool):
             )
         ]
     
-    def run_bash(command: str) -> str:
+    def run_bash(self,command: str) -> str:
         dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
         if any(d in command for d in dangerous):
             return "Error: Dangerous command blocked"
         try:
-            r = subprocess.run(command, shell=True, cwd=WORKDIR,
+            r = subprocess.run(command, shell=True, cwd=os.getcwd(),
                             capture_output=True, text=True, timeout=120)
             out = (r.stdout + r.stderr).strip()
             return out[:50000] if out else "(no output)"

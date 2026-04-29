@@ -1,6 +1,6 @@
 """工具注册表 - HelloAgents原生工具系统"""
 
-from typing import Optional, Any, Callable
+from typing import Dict,  Optional, Any, Callable
 from .base import Tool
 
 class ToolRegistry:
@@ -82,7 +82,7 @@ class ToolRegistry:
         func_info = self._functions.get(name)
         return func_info["func"] if func_info else None
 
-    def execute_tool(self, name: str, input_text: str) -> str:
+    def execute_tool(self, name:str, parameters:Dict[str, Any]) -> str:
         """
         执行工具
 
@@ -98,15 +98,14 @@ class ToolRegistry:
             tool = self._tools[name]
             try:
                 # 简化参数传递，直接传入字符串
-                return tool.run({"input": input_text})
+                return tool.run(parameters)
             except Exception as e:
                 return f"错误：执行工具 '{name}' 时发生异常: {str(e)}"
-
         # 查找函数工具
         elif name in self._functions:
             func = self._functions[name]["func"]
             try:
-                return func(input_text)
+                return func(parameters)
             except Exception as e:
                 return f"错误：执行工具 '{name}' 时发生异常: {str(e)}"
 

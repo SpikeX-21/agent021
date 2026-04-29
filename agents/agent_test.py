@@ -28,14 +28,16 @@ policy, hooks, and lifecycle controls on top.
 # -----------------------------------------------------------------------------
 import os
 import subprocess
+import sys
+sys.path.append("E:/Epic/agent021")
 
 # -----------------------------------------------------------------------------
 # 第三方库导入
 # -----------------------------------------------------------------------------
 from anthropic import Anthropic  # Anthropic API 客户端
 from dotenv import load_dotenv  # 从 .env 文件加载环境变量
-from ..tools.registry import ToolRegistry  # 工具注册表类
-from ..tools.builtin.bash import BashTool  # Bash 工具类
+from tools.registry import ToolRegistry  # 工具注册表类
+from tools.builtin.bash import BashTool  # Bash 工具类
 # -----------------------------------------------------------------------------
 # 环境变量初始化
 # -----------------------------------------------------------------------------
@@ -58,57 +60,11 @@ MODEL = os.environ["MODEL_ID"]
 SYSTEM = f"You are a coding agent at {os.getcwd()}. Use bash to solve tasks. Act, don't explain."
 
 registry = ToolRegistry()  # 工具注册表实例
-
 bashTool = BashTool()  # 创建 Bash 工具实例
 registry.register_tool(bashTool)  # 将 Bash 工具注册到工具注册表中
 
 # 工具定义：描述可用的工具及其参数规范（OpenAI 风格函数调用格式）
 TOOLS = registry.get_all_tools_to_cc()  # 从工具注册表获取所有工具的定义
-# TOOLS = [{
-#     "name": "bash",  # 工具名称
-#     "description": "Run a shell command.",  # 工具功能描述
-#     "input_schema": {  # 参数 JSON Schema 定义
-#         "type": "object",
-#         "properties": {"command": {"type": "string"}},  # command 参数为字符串类型
-#         "required": ["command"],  # command 是必需参数
-#     },
-# }]
-
-
-# -----------------------------------------------------------------------------
-# 工具函数
-# -----------------------------------------------------------------------------
-
-def run_bash(command: str) -> str:
-    """
-    执行 shell 命令并返回输出。
-
-    该函数实现了安全防护机制，会阻止执行危险的命令（如 rm -rf /、sudo 等）。
-    命令执行超时时间为 120 秒，输出结果被截断至 50000 字符以内。
-
-    Args:
-        command: 要执行的 shell 命令字符串。
-
-    Returns:
-        命令的标准输出和错误输出合并后的字符串。如果执行失败或超时，
-        返回包含错误信息的字符串。
-    """
-    # 危险命令黑名单：包含这些子串的命令将被拒绝执行
-    dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
-    if any(d in command for d in dangerous):
-        return "Error: Dangerous command blocked"
-
-    try:
-        # 使用 subprocess 执行命令，设置 120 秒超时
-        r = subprocess.run(command, shell=True, cwd=os.getcwd(),
-                           capture_output=True, text=True, timeout=120)
-        # 合并 stdout 和 stderr，去除首尾空白字符
-        out = (r.stdout + r.stderr).strip()
-        # 限制返回内容长度，防止上下文过长
-        return out[:50000] if out else "(no output)"
-    except subprocess.TimeoutExpired:
-        return "Error: Timeout (120s)"
-
 
 # -----------------------------------------------------------------------------
 # 核心 Agent 循环
@@ -152,7 +108,7 @@ def agent_loop(messages: list):
                 print(f"模型输出的命令\033[33m$ {block.input['command']}\033[0m")
 
                 # 执行命令并获取输出
-                output = run_bash(block.input["command"])
+                output = registry.execute_tool(block.name, block.input)
 
                 # 打印工具执行结果（限制前 200 字符）
                 print("工具的执行结果 " + output[:200])
