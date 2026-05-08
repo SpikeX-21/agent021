@@ -25,6 +25,7 @@ agent_with_retry.py - 带指数退避重试的健壮 Agent
 # 标准库导入
 # -----------------------------------------------------------------------------
 import os
+import json
 import random
 import sys
 import time
@@ -122,7 +123,7 @@ class QueryDatabaseTool(Tool):
         record_id = int(parameters["id"])
 
         # 30% 概率抛出"瞬时"错误，让 registry 把异常转成错误字符串回传给模型
-        if random.random() < 0.5:
+        if random.random() < 0.9:
             raise RuntimeError(
                 f"Database connection timeout: failed to query {table}#{record_id}"
             )
@@ -153,6 +154,23 @@ MAX_ITERATIONS = 10
 
 # 可重试的 HTTP 状态码：限流与服务器侧瞬时故障
 RETRYABLE_STATUS = {429, 500, 503}
+
+# 同参工具循环检测阈值（按 (name, 规范化 input) 计数；is_error 的回合不计数）
+TOOL_LOOP_SOFT_K = 3   # 累计达到此数：在 tool_result 末尾注入软提示，让模型自己跳出
+TOOL_LOOP_HARD_K = 5   # 累计达到此数：处理完本轮工具后强制 return，兜底防止失控
+
+
+def _tool_signature(name: str, tool_input: Any) -> str:
+    """把一次工具调用规范化成可比较的签名串。
+
+    使用 json.dumps + sort_keys 保证 input 字典顺序不同也算同一签名；
+    default=str 兜底处理非 JSON 原生类型；序列化失败时 fallback 到 str()。
+    """
+    try:
+        payload = json.dumps(tool_input, sort_keys=True, default=str, ensure_ascii=False)
+    except Exception:
+        payload = str(tool_input)
+    return f"{name}|{payload}"
 
 ## 针对大模型sdk调用api时候的错误 进行的重试
 def with_retry(fn, max_attempts: int = MAX_ATTEMPTS):
@@ -219,11 +237,16 @@ def agent_loop(messages: list):
     在基础 "tool_use 直至停止" 模式上叠加：
     1. API 调用经 with_retry 包装，对 429/500/503 自动指数退避重试；
     2. 用 MAX_ITERATIONS 限制最大迭代次数，防止死循环；
-    3. 工具异常被捕获并以 tool_result(is_error=True) 回传给模型。
+    3. 工具异常被捕获并以 tool_result(is_error=True) 回传给模型；
+    4. 同参工具循环检测：连续相同签名达到 SOFT_K 注入软提示，达到 HARD_K 强制终止。
 
     Args:
         messages: 对话历史列表，原地追加助手响应与工具结果。
     """
+    # 同参工具循环计数器：仅成功调用计数，is_error=True 视为合法重试不计入
+    tool_call_counts: Dict[str, int] = {}
+    aborted_by_loop = False
+
     for iteration in range(1, MAX_ITERATIONS + 1):
         print(f"\n[loop] iteration {iteration}/{MAX_ITERATIONS}")
 
@@ -261,16 +284,54 @@ def agent_loop(messages: list):
                     is_error = True
                     print(f"\033[31m[tool] failed: {exc}\033[0m")
 
+                content = str(output)
+
+                # 同参循环检测：仅对成功调用计数，错误重试不算 loop
+                if not is_error:
+                    sig = _tool_signature(block.name, block.input)
+                    count = tool_call_counts.get(sig, 0) + 1
+                    tool_call_counts[sig] = count
+
+                    if count >= TOOL_LOOP_HARD_K:
+                        # 硬性 kill switch：当前轮工具结果照常回传，但循环结束后 return
+                        content += (
+                            f"\n\n[system] Tool loop aborted: {block.name} has been "
+                            f"called {count} times with identical arguments. "
+                            f"Terminating to prevent runaway."
+                        )
+                        print(
+                            f"\033[31m[abort] tool loop detected: {block.name} "
+                            f"called {count}x with same args, terminating.\033[0m"
+                        )
+                        aborted_by_loop = True
+                    elif count >= TOOL_LOOP_SOFT_K:
+                        # 软提示：把警告塞进 tool_result，由模型自己决策跳出
+                        preview = str(output)[:200]
+                        content += (
+                            f"\n\n[system] You have called {block.name} with the "
+                            f"same arguments {count} times. Last result: {preview!r}. "
+                            f"Stop repeating — try a different approach, summarize "
+                            f"what you have, or finish the task."
+                        )
+                        print(
+                            f"\033[33m[loop-warn] {block.name} called {count}x with "
+                            f"same args, injecting soft hint.\033[0m"
+                        )
+
                 results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
-                    "content": str(output),
+                    "content": content,
                     "is_error": is_error,
                 })
 
         # 将工具执行结果作为用户消息追加到对话历史
         # 这会触发下一次 LLM 调用，让模型基于工具结果继续处理
         messages.append({"role": "user", "content": results})
+
+        # 硬性 kill switch：保证 assistant/user 消息成对，再 return
+        if aborted_by_loop:
+            return
 
     # 超出最大循环次数，强制终止以避免失控
     print(f"\033[33m[warn] Agent reached MAX_ITERATIONS ({MAX_ITERATIONS}), terminating.\033[0m")
