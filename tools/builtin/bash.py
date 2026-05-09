@@ -3,19 +3,24 @@
 from typing import Dict, Any
 import subprocess
 import os
-from ..base import Tool
+from ..base import Tool, ToolParameter
+from ..response import ToolResponse
+
 
 class BashTool(Tool):
     """agent bash工具 - 通过执行shell命令来完成任务"""
-    
-    
+
+    MAX_BYTES = 50000
+    TIMEOUT_SEC = 120
+    DANGEROUS = ("rm -rf /", "sudo", "shutdown", "reboot", "> /dev/")
+
     def __init__(self):
         super().__init__(
             name="bash",
             description="Run a shell command."
         )
-    
-    def run(self, parameters: Dict[str, Any]) -> str:
+
+    def run(self, parameters: Dict[str, Any]) -> ToolResponse:
         """
         执行shell命令
 
@@ -23,27 +28,67 @@ class BashTool(Tool):
             parameters: 包含command参数的字典
 
         Returns:
-            命令执行结果
+            ToolResponse 结构化响应
         """
-        # 支持两种参数格式：command 和 expression
         command = parameters.get("command", "")
         if not command:
-            return "错误：命令不能为空"
+            return ToolResponse.error(code="INVALID_PARAM", message="命令不能为空")
 
         print(f"🧮 正在执行命令: {command}")
 
+        if any(d in command for d in self.DANGEROUS):
+            return ToolResponse.error(
+                code="DANGEROUS_COMMAND",
+                message=f"Dangerous command blocked: {command}",
+                context={"command": command},
+            )
+
         try:
-            # 解析并执行命令
-            result = self.run_bash(command)
-            print(f"✅ 命令执行结果: {result}")
-            return result
+            r = subprocess.run(
+                command, shell=True, cwd=os.getcwd(),
+                capture_output=True, text=True, timeout=self.TIMEOUT_SEC,
+            )
+        except subprocess.TimeoutExpired:
+            return ToolResponse.error(
+                code="TIMEOUT",
+                message=f"Timeout ({self.TIMEOUT_SEC}s)",
+                context={"command": command, "timeout": self.TIMEOUT_SEC},
+            )
         except Exception as e:
-            error_msg = f"命令执行失败: {str(e)}"
-            print(f"❌ {error_msg}")
-            return error_msg
-    
+            return ToolResponse.error(
+                code="EXEC_FAILED",
+                message=str(e),
+                context={"command": command},
+            )
+
+        out = (r.stdout + r.stderr).strip()
+        truncated = False
+        if len(out) > self.MAX_BYTES:
+            out = out[:self.MAX_BYTES]
+            truncated = True
+        text = out if out else "(no output)"
+        print(f"✅ 命令执行结果: {text}")
+
+        stats = {"returncode": r.returncode, "bytes": len(out)}
+        context = {"command": command}
+
+        if r.returncode != 0:
+            return ToolResponse.partial(
+                text=text,
+                data={"returncode": r.returncode},
+                stats=stats,
+                context=context,
+            )
+        if truncated:
+            return ToolResponse.partial(
+                text=text,
+                data={"truncated": True, "max_bytes": self.MAX_BYTES},
+                stats=stats,
+                context=context,
+            )
+        return ToolResponse.success(text=text, stats=stats, context=context)
+
     def get_parameters(self):
-        """获取工具参数定义"""
         from ..base import ToolParameter
         return [
             ToolParameter(
@@ -53,17 +98,5 @@ class BashTool(Tool):
                 required=True
             )
         ]
-    
-    def run_bash(self,command: str) -> str:
-        dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
-        if any(d in command for d in dangerous):
-            return "Error: Dangerous command blocked"
-        try:
-            r = subprocess.run(command, shell=True, cwd=os.getcwd(),
-                            capture_output=True, text=True, timeout=120)
-            out = (r.stdout + r.stderr).strip()
-            return out[:50000] if out else "(no output)"
-        except subprocess.TimeoutExpired:
-            return "Error: Timeout (120s)"   
 
 # -----------------------------------------------------------------------------

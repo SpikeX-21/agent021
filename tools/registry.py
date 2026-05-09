@@ -1,7 +1,8 @@
 """工具注册表 - HelloAgents原生工具系统"""
 
-from typing import Dict,  Optional, Any, Callable
+from typing import Dict,  Optional, Any, Callable, Union
 from .base import Tool
+from .response import ToolResponse, ToolStatus
 
 class ToolRegistry:
     """
@@ -84,14 +85,34 @@ class ToolRegistry:
 
     def execute_tool(self, name: str, parameters: Dict[str, Any]) -> str:
         """
-        执行工具
+        执行工具（向后兼容接口，返回字符串视图）
 
         Args:
             name: 工具名称
             parameters: 工具参数字典（兼容 Anthropic SDK block.input 对象）
 
         Returns:
-            工具执行结果字符串
+            工具执行结果字符串。若工具返回 ToolResponse：
+            - success → 返回 text
+            - partial → 返回 "[partial] text"
+            - error   → 返回 "[error CODE] message"
+        """
+        resp = self.execute_tool_structured(name, parameters)
+        return self._response_to_text(resp)
+
+    def execute_tool_structured(self, name: str, parameters: Dict[str, Any]) -> ToolResponse:
+        """
+        执行工具并始终返回结构化 ToolResponse。
+
+        工具可返回 ToolResponse 或 str；str 结果会被包装成 success/error：
+        包含 "Error" / "错误" 前缀的字符串会被识别为 error，其余为 success。
+
+        Args:
+            name: 工具名称
+            parameters: 工具参数字典
+
+        Returns:
+            ToolResponse 对象
         """
         # 确保 parameters 是普通 dict（兼容 Anthropic SDK 返回的类 dict 对象）
         if not isinstance(parameters, dict):
@@ -100,30 +121,70 @@ class ToolRegistry:
         # 优先查找 Tool 对象
         if name in self._tools:
             tool = self._tools[name]
-            # 校验必需参数
             missing = [
                 p.name for p in tool.get_parameters()
                 if p.required and p.name not in parameters
             ]
             if missing:
-                return f"错误：工具 '{name}' 缺少必需参数: {', '.join(missing)}"
+                return ToolResponse.error(
+                    code="MISSING_PARAM",
+                    message=f"工具 '{name}' 缺少必需参数: {', '.join(missing)}",
+                    context={"tool": name, "missing": missing},
+                )
             try:
-                result = tool.run(parameters)
-                return result if isinstance(result, str) else str(result)
+                raw = tool.run(parameters)
             except Exception as e:
-                return f"错误：执行工具 '{name}' 时发生异常: {str(e)}"
+                return ToolResponse.error(
+                    code="TOOL_EXCEPTION",
+                    message=f"执行工具 '{name}' 时发生异常: {str(e)}",
+                    context={"tool": name, "exception": type(e).__name__},
+                )
+            return self._normalize_result(name, raw)
 
         # 查找函数工具
         elif name in self._functions:
             func = self._functions[name]["func"]
             try:
-                result = func(parameters)
-                return result if isinstance(result, str) else str(result)
+                raw = func(parameters)
             except Exception as e:
-                return f"错误：执行工具 '{name}' 时发生异常: {str(e)}"
+                return ToolResponse.error(
+                    code="TOOL_EXCEPTION",
+                    message=f"执行工具 '{name}' 时发生异常: {str(e)}",
+                    context={"tool": name, "exception": type(e).__name__},
+                )
+            return self._normalize_result(name, raw)
 
-        else:
-            return f"错误：未找到名为 '{name}' 的工具。"
+        return ToolResponse.error(
+            code="TOOL_NOT_FOUND",
+            message=f"未找到名为 '{name}' 的工具。",
+            context={"tool": name},
+        )
+
+    @staticmethod
+    def _normalize_result(name: str, raw: Any) -> ToolResponse:
+        """把工具的原始返回值规范化为 ToolResponse"""
+        if isinstance(raw, ToolResponse):
+            return raw
+        text = raw if isinstance(raw, str) else str(raw)
+        # 兼容旧式字符串错误：以 "Error" / "错误" 开头视作 error
+        stripped = text.lstrip()
+        if stripped.startswith("Error") or stripped.startswith("错误"):
+            return ToolResponse.error(
+                code="LEGACY_ERROR",
+                message=text,
+                context={"tool": name},
+            )
+        return ToolResponse.success(text=text, context={"tool": name})
+
+    @staticmethod
+    def _response_to_text(resp: ToolResponse) -> str:
+        """把 ToolResponse 转为给 LLM 阅读的字符串视图"""
+        if resp.status is ToolStatus.SUCCESS:
+            return resp.text
+        if resp.status is ToolStatus.PARTIAL:
+            return f"[partial] {resp.text}"
+        code = (resp.error_info or {}).get("code", "ERROR")
+        return f"[error {code}] {resp.text}"
 
     def get_tools_description(self) -> str:
         """
